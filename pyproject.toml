@@ -1,0 +1,23 @@
+[project]
+name = "thesis-baselines"
+version = "0.1.0"
+description = "Answering baselines (PaperQA2, long context) for thesis-research-agent"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "paper-qa==2026.8.12",
+    "fhlmi==1.0.5",        # the release paper-qa 2026.8.12 was built against (both Aug 2026); pinned so runs repeat
+    "fhaviary==0.35.0",    # same reason
+]
+
+[dependency-groups]
+dev = ["pytest>=8.4"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 120

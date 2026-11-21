@@ -1,6 +1,6 @@
 # Plan: add PaperQA2 (and other answering baselines) so they run and score like evqa
 
-Status: plan only, nothing built. Written 21 Nov 2026.
+Status: built 21 Nov 2026 (see README.md). Section 4 names the files as planned; where the build differs, README.md and the code are right.
 
 ## 1. The problem in one paragraph
 
