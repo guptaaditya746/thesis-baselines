@@ -49,7 +49,14 @@ Model: every call goes to the LiteLLM gateway of `llm-setup` (`LITELLM_BASE_URL`
 - The agent clears chunk text from its results; `chunk_texts()` cuts the papers again the same way to get it back.
 - Known, harmless: in the fixed-order agent ("fake") the last "complete" step fails inside fhlmi/fhaviary
   (`_acompletion() takes 0 positional arguments`); the answer was already made, so it is kept.
-- The ToolSelector agent needs tool calling on the gateway (vLLM `--enable-auto-tool-choice` and a tool parser).
+- The ToolSelector agent needs tool calling on the gateway (vLLM `--enable-auto-tool-choice` and a tool parser;
+  for Qwen3.8 `qwen3_coder`, since it writes XML tool calls that `hermes` does not read).
+- vLLM 0.21 answers `tool_choice: "required"` (aviary's default) with an empty tool list, so the agent failed every
+  step. `agent_tool_choice: "auto"` (default) sends `auto` instead; `run_info.json` lists the patch.
+- `retrieval_query: "question"` (default): chunk retrieval searches with the bare question, while the evidence and
+  answer steps get the question plus the intent card. With the card in the query, the sparse (word count)
+  embedding missed the drug name (10 practice questions: right paper in the top 10 for 4/10 with the card, 8/9
+  without). `"full"` is PaperQA2's own behaviour.
 
 ## Test
 

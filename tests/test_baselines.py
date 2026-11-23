@@ -156,3 +156,63 @@ def test_paperqa2_end_to_end_with_fake_gateway(papers: Path, tmp_path: Path, sys
     assert all(b.get("chat_template_kwargs") == {"enable_thinking": False} for b in bodies)
     info = json.loads((out / "run_info.json").read_text())
     assert info["settings"]["chunk_chars"] == 3000 and "k" not in json.dumps(info["litellm_params"]).split('"')
+
+
+def test_tool_choice_patch_sends_auto_instead_of_required():
+    """vLLM 0.21 answers tool_choice "required" with an empty tool list; the agent must send "auto"."""
+    import asyncio
+
+    from aviary.core import Message, Tool, ToolSelector
+
+    def search(query: str) -> str:
+        """Search the papers.
+
+        Args:
+            query: words to search for.
+        """
+        return query
+
+    sent = []
+
+    async def acompletion(*_a, **kw):
+        sent.append(kw.get("tool_choice"))
+        call = {"id": "c1", "type": "function", "function": {"name": "search", "arguments": '{"query": "x"}'}}
+        msg = SimpleNamespace(model_dump=lambda: {"role": "assistant", "content": None, "tool_calls": [call]})
+        return SimpleNamespace(choices=[SimpleNamespace(finish_reason="tool_calls", message=msg)], usage=None)
+
+    original = ToolSelector.__call__
+    try:
+        assert paperqa2.patch_tool_choice("required") is False
+        assert paperqa2.patch_tool_choice("auto") is True
+        tool = Tool.from_function(search)
+        selector = ToolSelector(model_name="m", acompletion=acompletion)
+        asyncio.run(selector([Message(content="q")], [tool]))
+        asyncio.run(selector([Message(content="q")], [tool], tool_choice=tool))
+    finally:
+        ToolSelector.__call__ = original
+    assert sent[0] == "auto"
+    assert sent[1] == {"type": "function", "function": {"name": "search"}}  # a named tool is left alone
+
+
+def test_retrieval_query_patch_searches_with_bare_question(monkeypatch):
+    """The sparse search gets the bare question; the evidence and answer steps keep the intent card."""
+    import asyncio
+
+    from paperqa import Docs
+
+    seen = []
+
+    async def fake_retrieve(self, query, k, *a, **kw):
+        seen.append(query)
+        return []
+
+    monkeypatch.setattr(Docs, "retrieve_texts", fake_retrieve)
+    monkeypatch.setattr(paperqa2, "RETRIEVAL_QUERY", {})
+    assert paperqa2.patch_retrieval_query() is True
+    assert paperqa2.patch_retrieval_query() is False  # applied once
+    q = {"question": "How much does drugzan lower HbA1c?", "intent_card": [{"point": "time_point", "answer": "all"}]}
+    full = contract.question_text(q)
+    paperqa2.RETRIEVAL_QUERY[full] = q["question"]
+    asyncio.run(Docs().retrieve_texts(full, 10))
+    asyncio.run(Docs().retrieve_texts("a query the agent wrote", 10))
+    assert seen == [q["question"], "a query the agent wrote"]

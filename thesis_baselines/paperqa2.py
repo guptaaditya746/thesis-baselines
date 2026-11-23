@@ -45,6 +45,14 @@ DEFAULTS: dict[str, Any] = {
     "agent_max_timesteps": None,    # agent steps cap (None = PaperQA2 default)
     "agent_type": "ToolSelector",   # PaperQA2 default: the model picks tools (needs tool calling on the gateway);
                                     # "fake": PaperQA2's fixed order (search -> gather evidence -> answer), no tool calls
+    "agent_tool_choice": "auto",    # PaperQA2/aviary send "required"; vLLM 0.21 answers "required" with an empty
+                                    # tool list (finish_reason tool_calls, tool_calls []), so the agent fails every
+                                    # step. "auto" works. "required" restores PaperQA2's own choice.
+    "retrieval_query": "question",  # chunk retrieval searches with the bare question; the evidence and answer
+                                    # steps still get the question plus the intent card. With the card in the query,
+                                    # the sparse (word count) embedding is dominated by its common words and misses the
+                                    # drug name (q10 practice, offline: right paper in top 10 for 4/10 questions with
+                                    # the card, 8/9 without; Aditya, 23 Nov). "full": PaperQA2's own behaviour.
 }
 
 
@@ -87,6 +95,44 @@ def patch_router() -> bool:
     def get_router(self):
         return litellm.Router(model_list=self.config["model_list"])
     LiteLLMModel.get_router = get_router
+    return True
+
+
+RETRIEVAL_QUERY: dict[str, str] = {}  # full question text sent -> bare question, used by patch_retrieval_query
+
+
+def patch_retrieval_query() -> bool:
+    """Docs.retrieve_texts searches with the text it is given (the question plus the intent card, in aquery and in
+    the agent's gather_evidence when it passes the original question). Search with the bare question instead when
+    the text is one of ours (RETRIEVAL_QUERY); any other query (e.g. one the agent wrote) is left alone.
+    True when the patch was applied now."""
+    from paperqa import Docs
+    if getattr(Docs.retrieve_texts, "__wrapped_original__", None):
+        return False
+    original = Docs.retrieve_texts
+
+    async def retrieve_texts(self, query, *args, **kw):
+        return await original(self, RETRIEVAL_QUERY.get(query, query), *args, **kw)
+    retrieve_texts.__wrapped_original__ = original  # type: ignore[attr-defined]
+    Docs.retrieve_texts = retrieve_texts
+    return True
+
+
+def patch_tool_choice(choice: str) -> bool:
+    """aviary's ToolSelector sends tool_choice "required" unless told otherwise, and PaperQA2's agent loop calls it
+    without a tool_choice. Send `choice` instead of "required" (a named tool, e.g. the final "complete" step, is
+    left alone). True when the patch was applied."""
+    from aviary.core import ToolSelector
+    if choice == ToolSelector.TOOL_CHOICE_REQUIRED:
+        return False
+    original = getattr(ToolSelector.__call__, "__wrapped_original__", ToolSelector.__call__)
+
+    async def call(self, messages, tools, tool_choice=ToolSelector.TOOL_CHOICE_REQUIRED):
+        if tool_choice == ToolSelector.TOOL_CHOICE_REQUIRED:
+            tool_choice = choice
+        return await original(self, messages, tools, tool_choice)
+    call.__wrapped_original__ = original  # type: ignore[attr-defined]
+    ToolSelector.__call__ = call
     return True
 
 
@@ -195,9 +241,18 @@ async def run(system: str, questions: list[dict[str, Any]], papers: Path, out: P
     staged = stage(papers, out)
     chunks = await chunk_texts(staged, s)
     pqa = make_settings(s, staged, out)
-    patched = patch_router() if system == "paperqa2-agent" else False
+    patches = []
+    if system == "paperqa2-agent" and patch_router():
+        patches.append("LiteLLMModel.get_router")
+    if system == "paperqa2-agent" and s["agent_type"] == "ToolSelector" and patch_tool_choice(s["agent_tool_choice"]):
+        patches.append(f"ToolSelector tool_choice required -> {s['agent_tool_choice']}")
+    if s["retrieval_query"] == "question":
+        patch_retrieval_query()
+        patches.append("Docs.retrieve_texts: bare question as the search query")
+    elif s["retrieval_query"] != "full":
+        raise ValueError(f"retrieval_query must be 'question' or 'full', not {s['retrieval_query']!r}")
     contract.write_json(out / "run_info.json", {
-        "system": system, "patches": ["LiteLLMModel.get_router"] if patched else [],
+        "system": system, "patches": patches,
         "package_versions": {p: metadata.version(p) for p in ("paper-qa", "fhlmi", "fhaviary", "litellm")},
         "settings": s, "settings_hash": settings_hash(s),
         "litellm_params": gateway.public(gateway.litellm_params(s["model"], s["think"], 0.0, s["max_tokens"]))})
@@ -206,6 +261,8 @@ async def run(system: str, questions: list[dict[str, Any]], papers: Path, out: P
     docs = await _rag_docs(pqa, staged) if system == "paperqa2-rag" and todo else None
     for q in todo:
         text, t0 = contract.question_text(q), time.monotonic()
+        if s["retrieval_query"] == "question":
+            RETRIEVAL_QUERY[text] = str(q["question"])
         try:
             if docs is not None:
                 session = await docs.aquery(text, settings=pqa)
